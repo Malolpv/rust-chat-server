@@ -85,7 +85,7 @@ async fn process_client(
     }
 }
 
-async fn send_message(msg: String, writer: &mut OwnedWriteHalf) {
+async fn send_message(msg: &str, writer: &mut OwnedWriteHalf) {
     let _ = writer.write_all(msg.as_bytes()).await;
 }
 
@@ -122,11 +122,7 @@ async fn main() -> anyhow::Result<()> {
                 get_or_create_room(&mut room_guard.to_owned(), "general")
             };
 
-            send_message(
-                String::from("Welcome! you're in #general channel\n"),
-                &mut writer,
-            )
-            .await;
+            send_message("Welcome! you're in #general channel\n", &mut writer).await;
 
             // processing client
             process_client(reader, writer, room_tx, id).await;
