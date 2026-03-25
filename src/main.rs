@@ -4,11 +4,48 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::broadcast::Sender;
+use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 type RoomMap = Arc<RwLock<HashMap<String, broadcast::Sender<Message>>>>;
+
+struct ClientSession<'a> {
+    id: Uuid,
+    room_tx: &'a Sender<Message>,
+    room_rx: Receiver<Message>,
+    reader: &'a mut BufReader<OwnedReadHalf>,
+    writer: &'a mut OwnedWriteHalf,
+}
+
+impl<'a> ClientSession<'a> {
+    fn new(
+        room_tx: &'a Sender<Message>,
+        reader: &'a mut BufReader<OwnedReadHalf>,
+        writer: &'a mut OwnedWriteHalf,
+    ) -> Self {
+        Self {
+            // Generate unique ID to identify client
+            id: get_uuid(),
+            // Subscribe to the room sender
+            room_rx: room_tx.subscribe(),
+            room_tx,
+            reader,
+            writer,
+        }
+    }
+
+    // Change session broadcast sender to corresponding rooom and refresh room receiver
+    fn change_room(&mut self, room_tx: &'a Sender<Message>) {
+        self.room_tx = room_tx;
+        self.refresh();
+    }
+
+    // Refresh room broadcast receiver
+    fn refresh(&mut self) {
+        self.room_rx = self.room_tx.subscribe()
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Message {
@@ -42,44 +79,37 @@ fn get_or_create_room(
         .clone()
 }
 
-async fn process_client(
-    mut reader: BufReader<OwnedReadHalf>,
-    mut writer: OwnedWriteHalf,
-    room_tx: Sender<Message>,
-    id: Uuid,
-) {
-    let mut line = String::new();
-    let mut room_rx = room_tx.subscribe();
-
+async fn process_client<'a>(mut session: ClientSession<'a>) {
+    let mut buf = Vec::<u8>::new();
     loop {
-        line.clear();
+        buf.clear();
         tokio::select! {
-            // Client sent us something
-            result = reader.read_line(&mut line) => {
-                 // If empty line or error we want to get out
+            // Client sent us something reading until end of line
+            result = session.reader.read_until(b'\n', &mut buf) => {
+                // If empty line or error we want to get out
                 match result {
                     Ok(0) | Err(_) => break,
                     Ok(n_bytes) => {
-                        println!("Received {n_bytes} bytes from client: [{id}]");
+                        println!("Received {n_bytes} bytes from client: [{}]", session.id);
                         // Build message
-                        let msg = Message::new(id, line.clone());
+                        let msg = Message::new(session.id, String::from_utf8(buf.clone()).unwrap_or(String::from("Unable to parse Message to valid utf8")));
 
                         // broadcasting to all clients connected to this room
-                        let _ = room_tx.send(msg);
+                        let _ = session.room_tx.send(msg);
                     }
                 }
             }
             // Room broadcast Received
-            result = room_rx.recv() => {
+            result = session.room_rx.recv() => {
                 match result {
                     Ok(msg) => {
                         // We don't want to display our own messages
-                        if id != msg.sender {
-                            write_message(&msg.content, &mut writer).await;
+                        if session.id != msg.sender {
+                            write_message(&msg.content, session.writer).await;
                         }
                     }
                     Err(_) => break,
-                 }
+                }
             }
         }
     }
@@ -108,15 +138,12 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let (socket, addr) = listener.accept().await?;
 
-        // Generate unique ID to identify client
-        let id = get_uuid();
-
         println!("[{addr}] Connected !");
         let rooms = rooms.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = socket.into_split();
-            let reader = BufReader::new(reader);
+            let mut reader = BufReader::new(reader);
 
             // retrieve room broadcast
             let room_tx = {
@@ -126,8 +153,11 @@ async fn main() -> anyhow::Result<()> {
 
             write_message("Welcome! you're in #general channel\n", &mut writer).await;
 
+            // build user session
+            let session = ClientSession::new(&room_tx, &mut reader, &mut writer);
+
             // processing client
-            process_client(reader, writer, room_tx, id).await;
+            process_client(session).await;
 
             println!("[{addr}] Disconnected");
         });
