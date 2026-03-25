@@ -60,7 +60,7 @@ async fn process_client(
                 match result {
                     Ok(0) | Err(_) => break,
                     Ok(n_bytes) => {
-                        println!("Received {n_bytes} bytes");
+                        println!("Received {n_bytes} bytes from client: [{id}]");
                         // Build message
                         let msg = Message::new(id, line.clone());
 
@@ -75,7 +75,7 @@ async fn process_client(
                     Ok(msg) => {
                         // We don't want to display our own messages
                         if id != msg.sender {
-                            let _ = writer.write_all(msg.content.as_bytes()).await;
+                            write_message(&msg.content, &mut writer).await;
                         }
                     }
                     Err(_) => break,
@@ -85,8 +85,10 @@ async fn process_client(
     }
 }
 
-async fn send_message(msg: &str, writer: &mut OwnedWriteHalf) {
-    let _ = writer.write_all(msg.as_bytes()).await;
+async fn write_message(msg: &str, writer: &mut OwnedWriteHalf) {
+    if let Err(e) = writer.write_all(msg.as_bytes()).await {
+        println!("An error occured while writing to client: [{e}]");
+    }
 }
 
 #[tokio::main]
@@ -122,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
                 get_or_create_room(&mut room_guard.to_owned(), "general")
             };
 
-            send_message("Welcome! you're in #general channel\n", &mut writer).await;
+            write_message("Welcome! you're in #general channel\n", &mut writer).await;
 
             // processing client
             process_client(reader, writer, room_tx, id).await;
