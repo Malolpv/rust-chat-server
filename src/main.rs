@@ -85,6 +85,10 @@ async fn process_client(
     }
 }
 
+async fn send_message(msg: String, writer: &mut OwnedWriteHalf) {
+    let _ = writer.write_all(msg.as_bytes()).await;
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
@@ -109,14 +113,20 @@ async fn main() -> anyhow::Result<()> {
         let rooms = rooms.clone();
 
         tokio::spawn(async move {
-            let (reader, writer) = socket.into_split();
+            let (reader, mut writer) = socket.into_split();
             let reader = BufReader::new(reader);
 
-            // retrieve room sender
+            // retrieve room broadcast
             let room_tx = {
                 let room_guard = rooms.read().await;
                 get_or_create_room(&mut room_guard.to_owned(), "general")
             };
+
+            send_message(
+                String::from("Welcome! you're in #general channel\n"),
+                &mut writer,
+            )
+            .await;
 
             // processing client
             process_client(reader, writer, room_tx, id).await;
