@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -73,7 +74,7 @@ impl<'a> ClientSession<'a> {
     async fn join_room(&mut self, room_name: &str) {
         let room_tx = {
             let mut room_guard = self.rooms.write().await;
-            get_or_create_room(&mut *room_guard, room_name)
+            get_or_create_room(&mut room_guard, room_name)
         };
 
         // Update current session
@@ -89,7 +90,7 @@ impl<'a> ClientSession<'a> {
             .await
             .keys()
             .filter(|key| !key.is_empty())
-            .map(|key| key.clone())
+            .cloned()
             .collect::<Vec<String>>()
     }
 
@@ -102,7 +103,7 @@ impl<'a> ClientSession<'a> {
     }
 
     async fn write_message(&mut self, msg: &str) {
-        let msg = match msg.ends_with(|c| c == '\n') {
+        let msg = match msg.ends_with('\n') {
             true => msg.to_string(),
             false => format!("{}\n", msg),
         };
@@ -128,9 +129,11 @@ impl Message {
             name,
         }
     }
+}
 
-    fn to_string(&self) -> String {
-        format!("{}: {}", self.name, self.content)
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}: {}", self.name, self.content)
     }
 }
 
@@ -187,7 +190,7 @@ async fn process_client<'a>(mut session: ClientSession<'a>) {
 }
 
 /// Work in progress
-async fn handle_client_input<'a>(input: &str, session: &'a mut ClientSession<'_>) {
+async fn handle_client_input(input: &str, session: &'_ mut ClientSession<'_>) {
     let input = command::sanitize(input);
 
     // handle input as a command
@@ -200,8 +203,7 @@ async fn handle_client_input<'a>(input: &str, session: &'a mut ClientSession<'_>
             Err(e) => {
                 println!(
                     "[WARNING]: error while handling client [{}] command: {}",
-                    session.id,
-                    e.to_string()
+                    session.id, e
                 );
                 session.send_error(&e.to_string()).await;
             }

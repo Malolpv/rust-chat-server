@@ -12,13 +12,13 @@ pub enum CommmandParsingError {
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
-    /// /join <room>	Leave current room, join new room, announce in both
+    /// /join <room>    Leave current room, join new room, announce in both
     Join(String),
-    /// /rename <name>	Change display name
+    /// /rename <name>    Change display name
     Rename(String),
-    // /rooms	List all active rooms and member counts
+    // /rooms    List all active rooms and member counts
     Rooms,
-    /// /quit	Disconnect gracefully
+    /// /quit    Disconnect gracefully
     Quit,
 }
 
