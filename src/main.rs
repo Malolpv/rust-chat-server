@@ -13,6 +13,12 @@ mod command;
 
 type RoomMap = Arc<RwLock<HashMap<String, broadcast::Sender<Message>>>>;
 
+#[derive(PartialEq)]
+enum SessionEvent {
+    Continue,
+    Disconnect,
+}
+
 struct ClientSession<'a> {
     id: Uuid,
     room_tx: Sender<Message>,
@@ -94,8 +100,22 @@ impl<'a> ClientSession<'a> {
             .collect::<Vec<String>>()
     }
 
-    fn disconnect(&self) {
-        todo!()
+    async fn disconnect(&mut self) {
+        // Notify other users
+        self.broadcast_message(&format!("{} leaved the chat", self.name));
+
+        // Notify client
+        self.write_message("Goodbye").await;
+
+        // Shutting down writer
+        if let Err(e) = self.writer.shutdown().await {
+            eprintln!(
+                "[ERROR] error while shutting down writer for client [{}]: {}",
+                self.id, e
+            );
+        }
+
+        println!("[INFO] client [{}] disconnected", self.id);
     }
 
     fn rename(&mut self, name: String) {
@@ -163,13 +183,21 @@ async fn process_client<'a>(mut session: ClientSession<'a>) {
             result = session.reader.read_until(b'\n', &mut buf) => {
                 // If empty line or error we want to get out
                 match result {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => {
+                        // Client closed connection or there is a network error
+                        eprintln!("[WARNING] connection with client [{}] ended prematurely. Client may have closed connection", session.id);
+                        session.disconnect().await;
+                        break;
+                    },
                     Ok(n_bytes) => {
                         println!("Received {n_bytes} bytes from client: [{}]", session.id);
 
                         let line = String::from_utf8(buf.clone()).unwrap_or(String::from("Unable to parse Message to valid utf8"));
 
-                        handle_client_input(&line, &mut session).await;
+                        if let Some(event) = handle_client_input(&line, &mut session).await
+                            && event == SessionEvent::Disconnect {
+                            break;
+                        }
                     }
                 }
             }
@@ -190,15 +218,24 @@ async fn process_client<'a>(mut session: ClientSession<'a>) {
 }
 
 /// Work in progress
-async fn handle_client_input(input: &str, session: &'_ mut ClientSession<'_>) {
+async fn handle_client_input(
+    input: &str,
+    session: &'_ mut ClientSession<'_>,
+) -> Option<SessionEvent> {
     let input = command::sanitize(input);
 
     // handle input as a command
     if command::is_a_command(&input) {
         match command::try_parse(&input) {
             Ok(cmd) => {
+                let command = cmd.clone();
                 // execute Command
                 cmd.execute(session).await;
+
+                // Notify session that we need to Quit
+                if command == command::Command::Quit {
+                    return Some(SessionEvent::Disconnect);
+                }
             }
             Err(e) => {
                 println!(
@@ -212,6 +249,8 @@ async fn handle_client_input(input: &str, session: &'_ mut ClientSession<'_>) {
         // Handle input as a message
         session.broadcast_message(&input);
     }
+
+    Some(SessionEvent::Continue)
 }
 
 #[tokio::main]
@@ -262,8 +301,6 @@ async fn main() -> anyhow::Result<()> {
 
             // processing client
             process_client(session).await;
-
-            println!("[{addr}] Disconnected");
         });
     }
 }

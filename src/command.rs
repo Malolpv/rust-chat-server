@@ -10,7 +10,7 @@ pub enum CommmandParsingError {
     UnknownCommand(String),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Command {
     /// /join <room>    Leave current room, join new room, announce in both
     Join(String),
@@ -53,7 +53,7 @@ impl Command {
             }
             Self::Quit => {
                 println!("Client [{}] is closing connection", session.id);
-                session.disconnect();
+                session.disconnect().await;
             }
         }
     }
