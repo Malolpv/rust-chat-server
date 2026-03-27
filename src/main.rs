@@ -8,21 +8,28 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
+mod command;
+
 type RoomMap = Arc<RwLock<HashMap<String, broadcast::Sender<Message>>>>;
 
 struct ClientSession<'a> {
     id: Uuid,
-    room_tx: &'a Sender<Message>,
+    room_tx: Sender<Message>,
     room_rx: Receiver<Message>,
     reader: &'a mut BufReader<OwnedReadHalf>,
     writer: &'a mut OwnedWriteHalf,
+    name: String,
+    // TODO Maybe put in a shared context with other usefuls values
+    rooms: RoomMap,
 }
 
 impl<'a> ClientSession<'a> {
     fn new(
-        room_tx: &'a Sender<Message>,
+        room_tx: Sender<Message>,
         reader: &'a mut BufReader<OwnedReadHalf>,
         writer: &'a mut OwnedWriteHalf,
+        name: String,
+        rooms: RoomMap,
     ) -> Self {
         Self {
             // Generate unique ID to identify client
@@ -32,33 +39,98 @@ impl<'a> ClientSession<'a> {
             room_tx,
             reader,
             writer,
+            name,
+            rooms,
         }
-    }
-
-    // Change session broadcast sender to corresponding rooom and refresh room receiver
-    fn change_room(&mut self, room_tx: &'a Sender<Message>) {
-        self.room_tx = room_tx;
-        self.refresh();
     }
 
     // Refresh room broadcast receiver
     fn refresh(&mut self) {
         self.room_rx = self.room_tx.subscribe()
     }
+
+    /// broadcast a message to the linked room
+    fn broadcast_message(&self, msg: &str) {
+        let msg = Message::new(self.id, msg.to_string(), self.name.clone());
+        if let Err(e) = self.room_tx.send(msg) {
+            eprintln!(
+                "[ERROR] Error while broadcasting a message from client [{}] details: {e}",
+                self.id
+            );
+        }
+    }
+
+    /// Send an error to the client
+    async fn send_error(&mut self, error: &str) {
+        if let Err(e) = self.writer.write_all(error.as_bytes()).await {
+            eprintln!(
+                "[ERROR] Error while writing an error message to client [{}] details: {e}",
+                self.id
+            );
+        }
+    }
+
+    async fn join_room(&mut self, room_name: &str) {
+        let room_tx = {
+            let mut room_guard = self.rooms.write().await;
+            get_or_create_room(&mut *room_guard, room_name)
+        };
+
+        // Update current session
+        self.room_tx = room_tx;
+        self.refresh();
+    }
+
+    // TODO Maybe rework this function
+    /// Return a vec of all rooms entries
+    async fn list_rooms(&self) -> Vec<String> {
+        self.rooms
+            .read()
+            .await
+            .keys()
+            .filter(|key| !key.is_empty())
+            .map(|key| key.clone())
+            .collect::<Vec<String>>()
+    }
+
+    fn disconnect(&self) {
+        todo!()
+    }
+
+    fn rename(&mut self, name: String) {
+        self.name = name;
+    }
+
+    async fn write_message(&mut self, msg: &str) {
+        let msg = match msg.ends_with(|c| c == '\n') {
+            true => msg.to_string(),
+            false => format!("{}\n", msg),
+        };
+
+        if let Err(e) = self.writer.write_all(msg.as_bytes()).await {
+            println!("An error occured while writing to client: [{e}]");
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Message {
     sender: Uuid,
+    name: String,
     content: String,
 }
 
 impl Message {
-    fn new(sender: Uuid, msg: String) -> Self {
+    fn new(sender: Uuid, msg: String, name: String) -> Self {
         Self {
             sender,
             content: msg,
+            name,
         }
+    }
+
+    fn to_string(&self) -> String {
+        format!("{}: {}", self.name, self.content)
     }
 }
 
@@ -91,11 +163,10 @@ async fn process_client<'a>(mut session: ClientSession<'a>) {
                     Ok(0) | Err(_) => break,
                     Ok(n_bytes) => {
                         println!("Received {n_bytes} bytes from client: [{}]", session.id);
-                        // Build message
-                        let msg = Message::new(session.id, String::from_utf8(buf.clone()).unwrap_or(String::from("Unable to parse Message to valid utf8")));
 
-                        // broadcasting to all clients connected to this room
-                        let _ = session.room_tx.send(msg);
+                        let line = String::from_utf8(buf.clone()).unwrap_or(String::from("Unable to parse Message to valid utf8"));
+
+                        handle_client_input(&line, &mut session).await;
                     }
                 }
             }
@@ -105,7 +176,7 @@ async fn process_client<'a>(mut session: ClientSession<'a>) {
                     Ok(msg) => {
                         // We don't want to display our own messages
                         if session.id != msg.sender {
-                            write_message(&msg.content, session.writer).await;
+                            session.write_message(&msg.to_string()).await;
                         }
                     }
                     Err(_) => break,
@@ -115,9 +186,29 @@ async fn process_client<'a>(mut session: ClientSession<'a>) {
     }
 }
 
-async fn write_message(msg: &str, writer: &mut OwnedWriteHalf) {
-    if let Err(e) = writer.write_all(msg.as_bytes()).await {
-        println!("An error occured while writing to client: [{e}]");
+/// Work in progress
+async fn handle_client_input<'a>(input: &str, session: &'a mut ClientSession<'_>) {
+    let input = command::sanitize(input);
+
+    // handle input as a command
+    if command::is_a_command(&input) {
+        match command::try_parse(&input) {
+            Ok(cmd) => {
+                // execute Command
+                cmd.execute(session).await;
+            }
+            Err(e) => {
+                println!(
+                    "[WARNING]: error while handling client [{}] command: {}",
+                    session.id,
+                    e.to_string()
+                );
+                session.send_error(&e.to_string()).await;
+            }
+        };
+    } else {
+        // Handle input as a message
+        session.broadcast_message(&input);
     }
 }
 
@@ -146,15 +237,26 @@ async fn main() -> anyhow::Result<()> {
             let mut reader = BufReader::new(reader);
 
             // retrieve room broadcast
+            // TODO Setup this in a better way
             let room_tx = {
                 let room_guard = rooms.read().await;
                 get_or_create_room(&mut room_guard.to_owned(), "general")
             };
 
-            write_message("Welcome! you're in #general channel\n", &mut writer).await;
-
             // build user session
-            let session = ClientSession::new(&room_tx, &mut reader, &mut writer);
+            // TODO Put a dynamic name
+            let mut session = ClientSession::new(
+                room_tx,
+                &mut reader,
+                &mut writer,
+                "Guest".to_string(),
+                rooms,
+            );
+
+            // Walcome the user
+            session
+                .write_message("Welcome! you're in #general channel")
+                .await;
 
             // processing client
             process_client(session).await;
