@@ -49,7 +49,7 @@ impl Command {
             }
             Self::Rooms => {
                 println!("Client [{}] is listing rooms", session.id);
-                session.list_rooms().await;
+                session.display_rooms().await;
             }
             Self::Quit => {
                 println!("Client [{}] is closing connection", session.id);

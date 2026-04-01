@@ -100,6 +100,32 @@ impl<'a> ClientSession<'a> {
             .collect::<Vec<String>>()
     }
 
+    /// Calls self.list_rooms and format its output :
+    /// Available rooms :
+    /// #general
+    /// #room_1
+    /// #...
+    /// #room_n
+    async fn display_rooms(&mut self) {
+        // Get a list rooms
+        let mut rooms = self.list_rooms().await;
+
+        // Sort the list of rooms
+        //
+        rooms.sort();
+
+        // Formats the rooms to be displayed row by row with a leading '#' char
+        let formatted_rooms = rooms
+            .iter()
+            .map(|room| format!("#{}", room))
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        // Writes output to the client
+        self.write_message(&format!("Available rooms :\n{}", formatted_rooms))
+            .await;
+    }
+
     async fn disconnect(&mut self) {
         // Notify other users
         self.broadcast_message(&format!("{} leaved the chat", self.name));
